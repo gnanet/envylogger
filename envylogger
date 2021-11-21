@@ -1,0 +1,605 @@
+#!/usr/bin/perl -T
+#
+# envylogger - smarter logging for apache
+# Gergely Nagy <gna@r-us.hu>
+#
+# this script will take piped logs in STDIN, break off the first component
+# and log the line into the proper directory under $LOGDIR.  it will roll the
+# logs over at midnight on-the-fly and maintain a symlink to the most recent log.
+#
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Library General Public
+# License as published by the Free Software Foundation; either
+# version 2 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Library General Public License for more details.
+#
+# 
+# CHANGELOG:
+# 0.1	initial release of vlogger
+# 0.2	cleanups, added -e option for errorlogs, added strict stuff
+# 0.3	cleanups, bugfixes, docs, added -r size rotation option
+# 0.4   added dbi usage tracking option, code cleanups from cz@digitalfreaks.org
+# 1.0	small bugfixes, first production release
+# 1.1   bugfix release
+# 1.2   support for mod_logio
+# 1.3	various contributed bugfixes
+# 1.5-1 env variable based vhost separation,including errorlog separation
+# 1.5-2 code cleanup and rename vlogger -> envylogger
+# 1.5-3 remove usage tracker,not inteded to develop that further
+# 
+# TODO:
+# configurable file compression using Compress::Zlib, maybe.
+# 
+
+package envylogger;
+
+$ENV{PATH} = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+my $VERSION = "1.5-3";
+
+=pod
+
+=head1 NAME
+
+envylogger - flexible log rotation in perl
+
+=head1 SYNOPSIS
+
+envylogger [OPTIONS]... [LOGDIR]
+
+=head1 DESCRIPTION
+
+envylogger is a redesigned variant of vlogger, to allow custom named VirtualHost
+folders each containing a logs folder to place logs into.
+envylogger takes piped output from Apache, splits off the first field, and writes
+the logs to logfiles into the logs sub-folder of subdirectories.  It uses a
+filehandle cache to avoid resource limitations.
+It will start a new logfile at the beginning of a new day, and optionally start
+new files when a certain filesize is reached.  It can maintain a symlink to
+the most recent log for easy access. 
+For Apache 2.4 and up, the same first-field parsing can be enabled, to be
+used in ErrorLog directives, by specifying an ErrorLogFormat.
+
+=head1 USAGE AND EXAMPLES
+
+To start using envylogger, set the environment variable ENVY_NAME inside your vhosts' configs to the dirname of your vhost, that contains the 'logs' directory:
+
+=head2  EXAMPLE:
+
+=over
+
+=item *
+
+B<If the full path to your logs dir is:> C<<< /var/www/my_envy_dir/logs/ >>>
+
+=item *
+
+B<then set the variable so:> C<<< SetEnv ENVY_NAME my_envy_dir >>>
+
+=item *
+
+B<Next, you need to add the "%{ENVY_NAME}e" to the first part of your LogFormat:>
+
+C<<< LogFormat "%{ENVY_NAME}e %h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" envy_combined >>>
+
+=item *
+
+B<Then call it from a customlog:>
+
+C<<< CustomLog "| /usr/local/sbin/envylogger -t access.apache.%Y.%m.%d.log -u www-data -g www-data /var/www" envy_combined >>>
+
+=item *
+
+B<For Apache 2.4+, the same host parsing can be enabled, first you need to add a custom ErrorLogFormat, starting with "%{ENVY_NAME}e" :>
+
+C<<< ErrorLogFormat "%{ENVY_NAME}e [%{u}t] [%-m:%l] [pid %P] %7F: %E: [client\ %a] %M% ,\ referer\ %{Referer}i" >>>
+
+=item *
+
+B<NOTE: the above format should only used in conjuction with piping ErrorLog to envylogger:>
+
+C<<< ErrorLog  "| /usr/local/sbin/envylogger -e -t error.apache.%Y.%m.%d.log -u www-data -g www-data /var/www" >>>
+
+=back
+
+=head1 OPTIONS
+
+Options are given in short format on the command line.
+
+-a
+	Do not autoflush files.  This may improve performance but may break logfile
+analyzers that depend on full entries in the logs.
+
+-e
+	ErrorLog mode.  In this mode, the host parsing is disabled, and the file is
+written out using the template under the specified LOGDIR.
+	
+-n
+	Disables rotation.  This option disables rotation altogether.
+
+-f MAXFILES
+	Maximum number of filehandles to keep open.  Defaults to 100.  Setting this
+value too high may result in the system running out of file descriptors.
+Setting it too low may affect performance.
+
+-u UID
+	Change user to UID when running as root.
+
+-g GID
+	Change group to GID when running as root.
+
+-t TEMPLATE
+	Filename template using Date::Format codes.  Default envy format is "access.apache.%Y.%m.%d.log",
+or "error.apache.%Y.%m.%d.log".  When using the -r option, the default becomes
+"%m%d%Y-%T-access.log" or "%m%d%Y-%T-error.log".
+
+-s SYMLINK
+	Specifies the name of a symlink to the current file.
+
+-r SIZE
+	Rotate files when they reach SIZE.  SIZE is given in bytes.
+
+-h
+	Displays help.
+
+-v
+	Prints version information.
+
+=head1 SEE ALSO
+
+vlogger(1), cronolog(1), httplog(1)
+
+=head1 BUGS
+
+None, yet.
+
+=head1 AUTHORS
+
+Gergely Nagy <gna@r-us.hu>
+	
+WWW: L<https://github.com/gnanet/envylogger|https://github.com/gnanet/envylogger>
+	
+=cut
+
+# a couple modules we need
+use strict;
+no strict "refs";
+use warnings;
+use sigtrap qw(handler exitall HUP USR1 TERM INT PIPE);
+use Date::Format;
+use Getopt::Std;
+use IO::Handle;
+
+# get command line options
+our %OPTS;
+getopts( 'f:t:s:hu:g:aeivr:d:n', \%OPTS );
+
+# print out version
+if ( $OPTS{'v'} ) {
+    print "envylogger $VERSION (apache logfile parser)\n";
+    print "Written by Gergely Nagy <gna\@r-us.hu>\n\n";
+    print "This is free software; see the source for copying conditions.  There is NO\n";
+    print "warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n";
+    exit;
+}
+
+# print help
+if ( $OPTS{'h'} || !$ARGV[0] ) {
+    usage();
+    exit;
+}
+
+# log directory
+my $LOGDIR;
+if ( $ARGV[0] ) {
+    if ( !-d $ARGV[0] ) {
+        print STDERR
+          "[envylogger] target directory $ARGV[0] does not exist - exiting.\n\n";
+        exit;
+    }
+    $LOGDIR = $ARGV[0];
+}
+$LOGDIR =~ /(.*)/;
+$LOGDIR = $1;
+
+# apache-default log directory
+my $APACHE_LOGDIR;
+
+if (( $ENV{'APACHE_LOG_DIR'} ) && ( -d $ENV{'APACHE_LOG_DIR'} )) {
+    $APACHE_LOGDIR = $ENV{'APACHE_LOG_DIR'};
+    $APACHE_LOGDIR =~ /(.*)/;
+    $APACHE_LOGDIR = $1;
+}
+elsif ( -d '/var/log/apache2' ) {
+    $APACHE_LOGDIR = '/var/log/apache2';
+    $APACHE_LOGDIR =~ /(.*)/;
+    $APACHE_LOGDIR = $1;
+}
+
+# change uid/gid if requested (and running as root)
+if ( $> == "0" ) {
+    if ( $OPTS{'g'} ) {
+        my $guid = getgrnam( $OPTS{'g'} );
+        if ( !defined $guid || $guid == 0 ) {
+            print STDERR
+              "[envylogger] cannot run as root or nonexistant group.\n\n";
+            exit;
+        }
+
+        $) = $guid;
+        $( = $guid;
+        if ( $) != $guid and $) != ( $guid - 2**32 ) ) {
+            die "fatal: setgid to gid $guid failed\n";
+        }
+    }
+
+    if ( $OPTS{'u'} ) {
+        my $uuid = getpwnam( $OPTS{'u'} );
+        if ( !defined $uuid || $uuid == 0 ) {
+            print STDERR
+              "[envylogger] cannot run as root or nonexistant user.\n\n";
+            exit;
+        }
+
+        $> = $uuid;
+        $< = $uuid;
+        if ( $> != $uuid and $> != ( $uuid - 2**32 ) ) {
+            die "fatal: setuid to uid $uuid failed\n";
+        }
+    }
+}
+
+# max files to keep open
+my $MAXFILES;
+if ( $OPTS{'f'} ) {
+    $MAXFILES = $OPTS{'f'};
+}
+else {
+    $MAXFILES = "100";
+}
+
+# filesize rotation
+my $MAXSIZE;
+if ( $OPTS{'r'} ) {
+    $MAXSIZE = $OPTS{'r'};
+}
+
+# filename template
+my $TEMPLATE;
+if ( $OPTS{'t'} ) {
+    $TEMPLATE = $OPTS{'t'};
+    $TEMPLATE =~ /(.*)/;
+    $TEMPLATE = $1;
+
+}
+elsif ( $OPTS{'e'} ) {
+    if ( $OPTS{'r'} ) {
+        $TEMPLATE = "%m%d%Y-%T-error.log";
+    }
+    else {
+        # $TEMPLATE = "%m%d%Y-error.log";
+        $TEMPLATE = "error.apache.%Y.%m.%d.log";
+    }
+}
+else {
+    if ( $OPTS{'r'} ) {
+        $TEMPLATE = "%m%d%Y-%T-access.log";
+    }
+    else {
+        # $TEMPLATE = "%m%d%Y-access.log";
+        $TEMPLATE = "access.apache.%Y.%m.%d.log";
+    }
+}
+
+# symlink
+if ( $OPTS{'s'} ) {
+    $OPTS{'s'} =~ /(.*)/;
+    $OPTS{'s'} = $1;
+}
+
+# change to the logdir
+chdir($LOGDIR);
+# chroot to the logdir
+# this is undesired if the apache-default logdir differs from the provided
+# chroot(".");
+
+my %logs     = ();
+my %errlogs  = ();
+
+# pick a mode
+if ( $OPTS{'e'} ) {
+
+    # errorlog mode
+    $0 = "envylogger (error log)";
+
+    while ( my $log_line = <STDIN> ) {
+        my $logtime = time();
+
+        # parse out the first word (the envy vhost)
+        my @this_line = split ( /\s/, $log_line );
+        my ($errvhost) = $this_line[0];
+        $errvhost = lc($errvhost) || "default";
+        if ( $errvhost eq '-' ) { $errvhost = "default" }
+        if ( $errvhost =~ /^\[/ ) { $errvhost = "default" }
+        if ( $errvhost =~ m#[/\\]# ) { $errvhost = "default" }
+        $errvhost =~ /(.*)/o;
+        $errvhost = $1;
+        $errvhost = 'default' unless $errvhost;
+
+        unless ( $OPTS{'n'} ) {
+            if ( $errlogs{$errvhost}
+                && ( time2str( "%Y%m%d", $logtime ) >
+                    time2str( "%Y%m%d", $errlogs{$errvhost} ) ) )
+            {
+                foreach my $errkey ( keys %errlogs ) {
+                    close $errkey;
+                }
+                %errlogs = ();
+            }
+            elsif ( $OPTS{'r'} && $errlogs{$errvhost} ) {
+
+                # check the size
+                my @filesize = $errvhost->stat;
+                if ( $filesize[7] > $MAXSIZE ) {
+                    close $errvhost;
+                    delete( $errlogs{$errvhost} );
+                }
+            }
+
+        }
+
+        # open a new log
+        if ( !$errlogs{$errvhost} ) {
+
+            # check how many files we have open, close the oldest one
+            if ( keys(%errlogs) > $MAXFILES ) {
+                my ( $errkey, $value ) =
+                  sort { $errlogs{$a} <=> $errlogs{$b} } ( keys(%errlogs) );
+                close $errkey;
+                delete( $errlogs{$errkey} );
+            }
+
+            if ( ${errvhost} ne 'default' ) {
+                # check if directory is there
+                unless ( -d "${errvhost}" ) {
+                    mkdir("${errvhost}");
+                }
+    
+                # check if directory is there
+                unless ( -d "${errvhost}/logs" ) {
+                    mkdir("${errvhost}/logs");
+                }
+            }
+
+            # open the file using the template
+            if ( ${errvhost} eq 'default' ) {
+                open $errvhost, ">>$APACHE_LOGDIR/" . time2str( $TEMPLATE, $logtime )
+                  or die ( "can't open $APACHE_LOGDIR/"
+                    . time2str( $TEMPLATE, $logtime ) );
+            }
+            else {
+                open $errvhost, ">>${errvhost}/logs/" . time2str( $TEMPLATE, $logtime )
+                  or die ( "can't open $LOGDIR/${errvhost}/logs/"
+                    . time2str( $TEMPLATE, $logtime ) );
+            }
+
+            # autoflush the handle unless -a
+            if ( !$OPTS{'a'} ) {
+                $errvhost->autoflush(1);
+            }
+
+            # make a symlink if -s but not 'default' vhost
+            if ( ${errvhost} ne 'default' ) {
+                if ( $OPTS{'s'} ) {
+                    chdir("${errvhost}/logs");
+                    if ( -l $OPTS{'s'} ) {
+                        unlink( $OPTS{'s'} );
+                    }
+                    symlink( time2str( $TEMPLATE, $logtime ), $OPTS{'s'} );
+                    chdir("../..");
+                }
+            }
+        }
+
+        # update the timestamp and write the line
+        $errlogs{$errvhost} = $logtime;
+        if ($OPTS{'i'}) {
+            $log_line =~ s/^\S*\s+\S*\s+\S*\s+//o;
+        }
+        else {
+            if ( ${errvhost} ne 'default' ) {
+                $log_line =~ s/^\S*\s+//o;
+            }
+        }
+
+        # we dont need to do any other parsing at all, so write the line.
+        print $errvhost $log_line;
+    }
+
+}
+else {
+
+    # accesslog mode
+    $0 = "envylogger (access log)";
+    while ( my $log_line = <STDIN> ) {
+        my $logtime = time();
+
+        # parse out the first word (the envy vhost)
+        my @this_line = split ( /\s/, $log_line );
+        my ($vhost) = $this_line[0];
+        my $reqsize = $this_line[10];
+        $vhost = lc($vhost) || "default";
+        if ( $vhost eq '-' ) { $vhost = "default" }
+        if ( $vhost =~ m#[/\\]# ) { $vhost = "default" }
+        $vhost =~ /(.*)/o;
+        $vhost = $1;
+        $vhost = 'default' unless $vhost;
+
+        if ( $OPTS{'i'} ) {
+            $reqsize = $this_line[1] + $this_line[2];
+        }
+        
+        # if we're writing to a log, and it rolls to a new day, close all files.
+        unless ( $OPTS{'n'} ) {
+            if ( $logs{$vhost}
+                && ( time2str( "%Y%m%d", $logtime ) >
+                    time2str( "%Y%m%d", $logs{$vhost} ) ) )
+            {
+                foreach my $key ( keys %logs ) {
+                    close $key;
+                }
+                %logs = ();
+            }
+            elsif ( $OPTS{'r'} && $logs{$vhost} ) {
+
+                # check the size
+                my @filesize = $vhost->stat;
+                if ( $filesize[7] > $MAXSIZE ) {
+                    close $vhost;
+                    delete( $logs{$vhost} );
+                }
+            }
+        }
+
+        # open a new log
+        if ( !$logs{$vhost} ) {
+
+            # check how many files we have open, close the oldest one
+            if ( keys(%logs) > $MAXFILES ) {
+                my ( $key, $value ) =
+                  sort { $logs{$a} <=> $logs{$b} } ( keys(%logs) );
+                close $key;
+                delete( $logs{$key} );
+            }
+
+            if ( ${vhost} ne 'default' ) {
+                # check if directory is there
+                unless ( -d "${vhost}" ) {
+                    mkdir("${vhost}");
+                }
+    
+                # check if directory is there
+                unless ( -d "${vhost}/logs" ) {
+                    mkdir("${vhost}/logs");
+                }
+            }
+
+            # open the file using the template
+            if ( ${vhost} eq 'default' ) {
+                open $vhost, ">>$APACHE_LOGDIR/" . time2str( $TEMPLATE, $logtime )
+                  or die ( "can't open $APACHE_LOGDIR/"
+                    . time2str( $TEMPLATE, $logtime ) );
+            }
+            else {
+                open $vhost, ">>${vhost}/logs/" . time2str( $TEMPLATE, $logtime )
+                  or die ( "can't open $LOGDIR/${vhost}/logs/"
+                    . time2str( $TEMPLATE, $logtime ) );
+            }
+
+            # autoflush the handle unless -a
+            if ( !$OPTS{'a'} ) {
+                $vhost->autoflush(1);
+            }
+
+            # make a symlink if -s but not 'default' vhost
+            if ( ${vhost} ne 'default' ) {
+                if ( $OPTS{'s'} ) {
+                    chdir("${vhost}/logs");
+                    if ( -l $OPTS{'s'} ) {
+                        unlink( $OPTS{'s'} );
+                    }
+                    symlink( time2str( $TEMPLATE, $logtime ), $OPTS{'s'} );
+                    chdir("../..");
+                }
+            }
+        }
+
+        # update the timestamp and write the line
+        $logs{$vhost} = $logtime;
+        if ($OPTS{'i'}) {
+            $log_line =~ s/^\S*\s+\S*\s+\S*\s+//o;
+        }
+        else {
+            $log_line =~ s/^\S*\s+//o;
+        }
+
+        print $vhost $log_line;
+
+    }
+}
+
+# sub to close all files
+sub closeall {
+    if ( $OPTS{'e'} ) {
+        # close errorlogs
+        foreach my $errkey ( keys %errlogs ) {
+            close $errkey;
+        }
+        %errlogs = ();
+    }
+    else {
+        foreach my $key ( keys %logs ) {
+            close $key;
+        }
+        %logs = ();
+    }
+}
+
+sub exitall {
+    envylogger::closeall;
+    exit;
+}
+
+# sub to open new errorlog
+sub open_errorlog {
+    my $logtime = $_[0];
+    open ELOG, ">>" . time2str( $TEMPLATE, $logtime )
+      or die ( "can't open $LOGDIR/" . time2str( $TEMPLATE, $logtime ) );
+    if ( $OPTS{'s'} ) {
+        if ( -l $OPTS{'s'} ) {
+            unlink( $OPTS{'s'} );
+        }
+        symlink( time2str( $TEMPLATE, $logtime ), $OPTS{'s'} );
+    }
+
+    # autoflush it unless -a
+    unless ( $OPTS{'a'} ) {
+        ELOG->autoflush(1);
+    }
+}
+
+
+# print usage info
+sub usage {
+    print "Usage: envylogger [OPTIONS]... [LOGDIR]\n";
+    print "Handles a piped logfile from a webserver, splitting it into it's\n";
+    print "host components, and rotates the files daily.\n\n";
+    print "  -a                          do not autoflush files\n";
+    print "  -e                          errorlog mode\n";
+    print "  -n                          don't rotate files\n";
+    print "  -f MAXFILES                 max number of files to keep open\n";
+    print "  -u UID                      uid to switch to when running as root\n";
+    print "  -g GID                      gid to switch to when running as root\n";
+    print "  -t TEMPLATE                 filename template (see perldoc Date::Format)\n";
+    print "  -s SYMLINK                  maintain a symlink to most recent file\n";
+    print "  -r SIZE                     rotate when file reaches SIZE\n";
+    print "  -i                          extract mod_logio instead of filesize\n";
+    print "  -h                          display this help\n";
+    print "  -v                          output version information\n\n";
+    print "TEMPLATE may be a filename with Date::Format codes.  The default template\n";
+    print "is access.apache.%Y.%m.%d.log.  SYMLINK is the name of a file that will be linked to\n";
+    print "the most recent file inside the log directory.  The default is access.log.\n";
+    print "MAXFILES is the maximum number of filehandles to cache.  This defaults to 100.\n";
+    print "When running with -a, performance may improve, but this might confuse some\n";
+    print "log analysis software that expects complete log entries at all times.\n";
+    print "Errorlog mode is used when running with an Apache errorlog.  In this mode,\n";
+    print "virtualhost parsing have to be enabled using ErrorLogFormat,\n";
+    print "The ErrorLog TEMPLATE is error.apache.%Y.%m.%d.log by default for -e.  When running with\n";
+    print "-r, the template becomes %m%d%Y-%T-xxx.log.  SIZE is given in bytes.\n\n";
+    print "Report bugs to <gna\@r-us.hu>.\n";
+}

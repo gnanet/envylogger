@@ -1,0 +1,124 @@
+<?xml version="1.0" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title></title>
+<meta http-equiv="content-type" content="text/html; charset=utf-8" />
+<link rev="made" href="mailto:root@localhost" />
+</head>
+
+<body>
+
+<h1>envylogger - flexible log rotation in perl</h1>
+
+
+
+<ul id="index">
+  <li><a href="#NAME">NAME</a></li>
+  <li><a href="#SYNOPSIS">SYNOPSIS</a></li>
+  <li><a href="#DESCRIPTION">DESCRIPTION</a></li>
+  <li><a href="#USAGE-AND-EXAMPLES">USAGE AND EXAMPLES</a>
+    <ul>
+      <li><a href="#EXAMPLE">EXAMPLE:</a></li>
+    </ul>
+  </li>
+  <li><a href="#OPTIONS">OPTIONS</a></li>
+  <li><a href="#SEE-ALSO">SEE ALSO</a></li>
+  <li><a href="#BUGS">BUGS</a></li>
+  <li><a href="#AUTHORS">AUTHORS</a></li>
+</ul>
+
+<h1 id="NAME">NAME</h1>
+
+<p>envylogger - flexible log rotation in perl</p>
+
+<h1 id="SYNOPSIS">SYNOPSIS</h1>
+
+<p>envylogger [OPTIONS]... [LOGDIR]</p>
+
+<h1 id="DESCRIPTION">DESCRIPTION</h1>
+
+<p>envylogger is a redesigned variant of vlogger, to allow custom named VirtualHost folders each containing a logs folder to place logs into. envylogger takes piped output from Apache, splits off the first field, and writes the logs to logfiles into the logs sub-folder of subdirectories. It uses a filehandle cache to avoid resource limitations. It will start a new logfile at the beginning of a new day, and optionally start new files when a certain filesize is reached. It can maintain a symlink to the most recent log for easy access. For Apache 2.4 and up, the same first-field parsing can be enabled, to be used in ErrorLog directives, by specifying an ErrorLogFormat.</p>
+
+<h1 id="USAGE-AND-EXAMPLES">USAGE AND EXAMPLES</h1>
+
+<p>To start using envylogger, set the environment variable ENVY_NAME inside your vhosts&#39; configs to the dirname of your vhost, that contains the &#39;logs&#39; directory:</p>
+
+<h2 id="EXAMPLE">EXAMPLE:</h2>
+
+<ul>
+
+<li><p><b>If the full path to your logs dir is:</b> <code>/var/www/my_envy_dir/logs/</code></p>
+
+</li>
+<li><p><b>then set the variable so:</b> <code>SetEnv ENVY_NAME my_envy_dir</code></p>
+
+</li>
+<li><p><b>Next, you need to add the &quot;%{ENVY_NAME}e&quot; to the first part of your LogFormat:</b></p>
+
+<p><code>LogFormat &quot;%{ENVY_NAME}e %h %l %u %t \&quot;%r\&quot; %&gt;s %O \&quot;%{Referer}i\&quot; \&quot;%{User-Agent}i\&quot;&quot; envy_combined</code></p>
+
+</li>
+<li><p><b>Then call it from a customlog:</b></p>
+
+<p><code>CustomLog &quot;| /usr/local/sbin/envylogger -t access.apache.%Y.%m.%d.log -u www-data -g www-data /var/www&quot; envy_combined</code></p>
+
+</li>
+<li><p><b>For Apache 2.4+, the same host parsing can be enabled, first you need to add a custom ErrorLogFormat, starting with &quot;%{ENVY_NAME}e&quot; :</b></p>
+
+<p><code>ErrorLogFormat &quot;%{ENVY_NAME}e [%{u}t] [%-m:%l] [pid %P] %7F: %E: [client\ %a] %M% ,\ referer\ %{Referer}i&quot;</code></p>
+
+</li>
+<li><p><b>NOTE: the above format should only used in conjuction with piping ErrorLog to envylogger:</b></p>
+
+<p><code>ErrorLog &quot;| /usr/local/sbin/envylogger -e -t error.apache.%Y.%m.%d.log -u www-data -g www-data /var/www&quot;</code></p>
+
+</li>
+</ul>
+
+<h1 id="OPTIONS">OPTIONS</h1>
+
+<p>Options are given in short format on the command line.</p>
+
+<p>-a Do not autoflush files. This may improve performance but may break logfile analyzers that depend on full entries in the logs.</p>
+
+<p>-e ErrorLog mode. In this mode, the host parsing is disabled, and the file is written out using the template under the specified LOGDIR.</p>
+
+<p>-n Disables rotation. This option disables rotation altogether.</p>
+
+<p>-f MAXFILES Maximum number of filehandles to keep open. Defaults to 100. Setting this value too high may result in the system running out of file descriptors. Setting it too low may affect performance.</p>
+
+<p>-u UID Change user to UID when running as root.</p>
+
+<p>-g GID Change group to GID when running as root.</p>
+
+<p>-t TEMPLATE Filename template using Date::Format codes. Default envy format is &quot;access.apache.%Y.%m.%d.log&quot;, or &quot;error.apache.%Y.%m.%d.log&quot;. When using the -r option, the default becomes &quot;%m%d%Y-%T-access.log&quot; or &quot;%m%d%Y-%T-error.log&quot;.</p>
+
+<p>-s SYMLINK Specifies the name of a symlink to the current file.</p>
+
+<p>-r SIZE Rotate files when they reach SIZE. SIZE is given in bytes.</p>
+
+<p>-h Displays help.</p>
+
+<p>-v Prints version information.</p>
+
+<h1 id="SEE-ALSO">SEE ALSO</h1>
+
+<p>vlogger(1), cronolog(1), httplog(1)</p>
+
+<h1 id="BUGS">BUGS</h1>
+
+<p>None, yet.</p>
+
+<h1 id="AUTHORS">AUTHORS</h1>
+
+<p>Gergely Nagy &lt;gna@r-us.hu&gt;</p>
+
+<p>WWW: <a href="https://github.com/gnanet/envylogger">https://github.com/gnanet/envylogger</a></p>
+
+
+</body>
+
+</html>
+
+

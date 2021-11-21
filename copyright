@@ -1,0 +1,16 @@
+envylogger by Gergely Nagy <gna@r-us.hu> is a rewite of vlogger
+The package allows to split apache2.4 logs (both access.log and
+error.log) by specifying an enviroment variable in virtualhosts.
+
+Copyright 2021 Gergely Nagy <gna@r-us.hu>
+
+vlogger was debianized by RISKO Gergely <risko@debian.org> 
+on Thu, 24 Apr 2003 13:15:39 +0200.
+
+It was downloaded from http://n0rp.chemlab.org/vlogger
+
+Upstream Author: "steve j. kondik" <shade@chemlab.org>
+
+Copyright: LGPL (can be found at /usr/share/common-licenses/LGPL)
+
+Copyright 2003 steve j. kondik <shade@chemlab.org>
