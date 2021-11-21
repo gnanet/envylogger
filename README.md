@@ -2,7 +2,7 @@
 
 This script will take piped logs in STDIN, break off the first component specified as `ENVY_NAME` and log the line into the proper directory under $LOGDIR. It will roll the logs over at midnight on-the-fly and maintain a symlink to the most recent log.
 
-For usage docs read (envylogger.md)[envylogger.md]
+For usage docs read [envylogger.md](envylogger.md)
 
 (c) 2021 - Gergely Nagy <gna@r-us.hu>
 
